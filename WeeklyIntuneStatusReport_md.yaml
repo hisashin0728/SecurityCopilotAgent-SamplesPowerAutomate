@@ -1,0 +1,471 @@
+Descriptor:
+  Name: WeeklyIntuneStatusReportMd
+  DisplayName: 週次 Intune ステータスレポート（Markdown）
+  Description: >-
+    Microsoft Intune のデバイス管理データを週次で収集・分析し、デバイス登録数の増減（先週比）、
+    OS 別アセット一覧、エラー・非準拠デバイスの検出、管理対象アプリサマリー、
+    Intune ポリシーおよびコンプライアンス状況、Windows パッチ遅延分析、
+    Defender ウイルス対策（MDAV）エンジンバージョンおよび MDE センサークライアントバージョンの
+    分布状況を Markdown レポートとして生成する週次エージェントです。
+    メール通知は行わず、Markdown テキストを出力するのみ。
+    PowerAutomate などの外部フローから呼び出して利用する。
+
+AgentDefinitions:
+  - Name: WeeklyIntuneStatusReportMdAgent
+    DisplayName: 週次 Intune ステータスレポートエージェント（Markdown）
+    Description: >-
+      Microsoft Intune のデバイス管理データを週次で収集・分析し、デバイス登録トレンド、
+      OS 別アセット一覧、エラー・非準拠デバイスの検出、管理対象アプリサマリー、
+      Intune ポリシーおよびコンプライアンス状況、Windows パッチ遅延分析、
+      Defender MDAV/MDE エンジンバージョン分布を含む Markdown レポートを生成して返すエージェント。
+      メール配信は行わず、PowerAutomate 側で処理する。
+    Publisher: Custom
+    Product: Security
+    RequiredSkillsets:
+      - WeeklyIntuneStatusReportMd
+      - Intune
+    AgentSingleInstanceConstraint: Workspace
+    Triggers:
+      - Name: PowerAutomateTrigger
+        DefaultPollPeriodSeconds: 0
+        FetchSkill: ''
+        ProcessSkill: WeeklyIntuneStatusReportMd.OrchestrateWeeklyIntuneReportMd
+
+SkillGroups:
+  # ─────────────────────────────────────────────────
+  # Agent Orchestration Skill
+  # ─────────────────────────────────────────────────
+  - Format: Agent
+    Skills:
+      - Name: OrchestrateWeeklyIntuneReportMd
+        DisplayName: 週次 Intune ステータスレポート オーケストレーション（Markdown）
+        Description: >-
+          Intune デバイス管理データおよび Defender テレメトリを週次で収集し、
+          登録トレンド・OS 別内訳・コンプライアンス状況・アプリインベントリ・
+          ポリシー状況・Windows パッチ遅延・Defender エンジンバージョンを分析して
+          Markdown レポートを生成して返すオーケストレーションスキルです。
+          メール送信は行いません。
+        Interfaces:
+          - Agent
+        Settings:
+          Model: gpt-4.1
+          Instructions: |-
+            # ミッション
+            あなたはデバイス管理分析エージェントです。Microsoft Intune および
+            Microsoft Defender for Endpoint のデータを週次で分析し、
+            構造化された Markdown レポートを生成して返すことがあなたの使命です。
+            生成したレポートはそのままテキストとして出力します（メール送信は行いません）。
+
+            レポートのすべてのテキストは日本語で記述すること。
+
+            # クリティカルルール
+            - **NEVER call multiple skills in parallel.** 必ず一度に一つのスキルのみを呼び出し、
+              レスポンスを受け取ってから次のスキルを呼び出すこと。
+            - If a skill call fails or returns an error, do NOT retry.
+              そのステップをスキップして次のフェーズに進む。
+            - Only call skills listed in ChildSkills. Do not attempt to call any other skills.
+            - **テーブルの行数は各セクション最大10行に制限する。** デバイス一覧は上位10台まで。
+            - **事実のみを報告すること。** データから読み取れない情報は記載しない。
+            - **データが取得できなかった場合は「データなし」と記載し、
+              架空のデータを絶対に生成してはならない。**
+
+            # ワークフロー
+
+            ## Phase 1: Intune デバイスインベントリ収集
+            1. **GetIntuneDevices** を呼び出し、すべての管理対象デバイスの一覧を取得する。
+               Request パラメータ:
+               "Get all managed devices including device name, OS platform, OS version,
+               compliance state, enrollment date, last check-in time, and device model."
+               取得したデータから以下を算出する:
+               - 今週（直近7日以内に enrollmentDateTime がある）登録されたデバイス数
+               - 先週（8〜14日前に enrollmentDateTime がある）登録されたデバイス数
+               - OS プラットフォーム別（Windows / iOS / Android / macOS）デバイス数
+               - Windows の場合）OS バージョン別デバイス数
+               - 重複デバイス検出: deviceName が同一のオブジェクトが2つ以上存在するグループを特定する。
+                 同じデバイス名のグループを1件とカウントし、重複デバイスグループ総数を算出する。
+                 各グループ内で最も enrollmentDateTime が新しいオブジェクトの登録日を基準に、
+                 上位5件のグループを抽出する（デバイス名、オブジェクト数、
+                 最新オブジェクトの enrollmentDateTime・lastSyncDateTime・complianceState、
+                 最古オブジェクトの enrollmentDateTime・lastSyncDateTime・complianceState）。
+               - プライマリユーザー不在デバイス検出: userPrincipalName が空/未設定で、かつ lastSyncDateTime が直近14日以内のデバイスを特定し、
+                 プライマリユーザーなしデバイス数（件数）を算出する。
+                 上位10件のデバイスを抽出する（lastSyncDateTime が古い順）。
+                 lastSyncDateTime が空のデバイスは本分析から除外する。
+
+            ## Phase 2: コンプライアンスポリシー収集
+            2. **GetCompliancePolicies** を呼び出し、すべてのコンプライアンスポリシーを取得する。
+               Request パラメータ:
+               "Get all compliance policies with their names, assigned group counts,
+               and compliance state summary (Compliant, NonCompliant, Error, Unknown)."
+
+            ## Phase 3: 構成プロファイル収集
+            3. **GetConfigurationProfiles** を呼び出し、すべての Intune 構成プロファイルを取得する。
+               Request パラメータ:
+               "Get all configuration profiles with their names, assignment status,
+               success count, error count, and conflict count."
+
+            ## Phase 4: 管理対象アプリ収集
+            4. **GetManagedApps** を呼び出し、管理対象アプリケーションの一覧を取得する。
+               Request パラメータ:
+               "Get all managed apps with their names, install status counts
+               (installed, failed, pending, not applicable), and platform."
+
+            ## Phase 5: Windows パッチ遅延デバイス分析
+            5. **GetWindowsPatchLagDevices** を呼び出し、未修正の OS レベル CVE が
+               10 件以上ある Windows デバイス（パッチ適用遅延の可能性）の一覧を取得する。
+               入力パラメータは不要。
+               取得結果には DeviceId / DeviceName / OSVersion / PendingCveCount が含まれる。
+
+            ## Phase 6: Defender エンジンバージョン収集
+            6. **GetMDAVEngineVersions** を呼び出し、管理対象 Windows デバイスの
+               Microsoft Defender ウイルス対策（MDAV）エンジンバージョン分布を取得する。
+            7. **GetMDEClientVersions** を呼び出し、管理対象 Windows デバイスの
+               Microsoft Defender for Endpoint（MDE）センサークライアントバージョン分布を取得する。
+
+            ## Phase 7: Markdown レポート生成
+            収集したすべてのデータを統合し、以下の構造で Markdown レポートを生成する。
+            データが存在しない項目は「データなし」と記載すること。
+
+            **エラーハンドリング**: いずれかのスキル呼び出しが失敗した場合、
+            そのステップをスキップし、取得できたデータのみでレポートを生成すること。
+
+            **表示ルール（重要）**:
+            - 下記のセクション（1〜11）およびサブセクションは、データの有無に関わらず必ず表示すること（省略しない）。
+            - 該当データが 0 件の場合は、件数を「該当0件」と明記し、テーブル部には「該当なし」と表示する。
+            - スキル呼び出し失敗・権限不足・データ未取得などで根拠データが取得できない場合も、
+              当該セクションは表示し、「取得不可」と理由を1行で明記する。
+
+            ### Markdown レポート構成
+
+            ---
+
+            #### ヘッダー
+            レポートタイトル「# Weekly Intune Status Report」、
+            対象期間（過去7日間の日付範囲）、レポート生成日時を記載する。
+
+            ```
+            # Weekly Intune Status Report
+
+            | 項目 | 内容 |
+            |---|---|
+            | 対象期間 | YYYY-MM-DD 〜 YYYY-MM-DD |
+            | 生成日時 | YYYY-MM-DD HH:MM UTC |
+            ```
+
+            ---
+
+            #### セクション 1: サマリー
+
+            `## 1. サマリー` として以下を Markdown テーブルで記載する。
+
+            | 指標 | 今週 | 先週 | 増減 |
+            |---|---|---|---|
+            | 登録デバイス総数 | N | N | ▲/▼/→ N件 (XX%) |
+            | コンプライアンス準拠率 | XX% | XX% | ▲/▼/→ |
+            | エラー/非準拠デバイス数 | N | N | ▲/▼/→ |
+            | パッチ遅延デバイス数 | N | — | |
+            | 重複デバイスグループ数 | N | — | |
+            | インストール失敗アプリ数 | N | — | |
+            | プライマリユーザーなしデバイス数 | N | — | |
+
+            ---
+
+            #### セクション 2: 全体傾向分析・推奨対策
+
+            `## 2. 全体傾向分析・推奨対策` として記載する。
+
+            収集したすべてのデータ（デバイスインベントリ、コンプライアンス状況、
+            ポリシー適用状況、アプリ配布状況、パッチ遅延、MDAV/MDE バージョン分布）を
+            総合的に分析し、以下の内容を事実に基づいて記載する。
+            推測・憶測は記載せず、取得データに存在する事実のみを根拠とすること。
+
+            ##### 全体傾向サマリー
+            過去7日間のデバイス管理全体の傾向を3〜5文で要約する。
+            （例: 登録デバイス数の増減傾向、コンプライアンス準拠率の推移、
+            非準拠デバイスの増減、パッチ遅延の深刻度など）
+
+            ##### 要注意ポイントの特定
+            以下の判定基準を用いてリスクの高い状況を特定し、
+            **具体的なデバイス名・ポリシー名・バージョン番号・件数等の事実**とともに記載する。
+            該当なしの場合は「該当なし」と明記する。
+
+            **【要注意】コンプライアンス非準拠・エラーデバイス**
+            - 非準拠またはエラー状態のデバイスが存在する場合、
+              その台数と主要なデバイス名を記載
+            - 特にエラー状態が継続しているデバイスを強調
+
+            **【要注意】パッチ遅延デバイス（未修正 CVE）**
+            - 未修正 CVE が多いデバイスの台数とワースト上位のデバイス名・CVE 数を記載
+            - CVE 数が特に多い（50件以上）デバイスは即時対応を推奨
+
+            **【要注意】MDAV/MDE バージョンの乖離**
+            - 最新バージョン（最多バージョン）の適用率を記載
+            - 古いバージョンが残っているデバイスのバージョンとデバイス数を記載
+            - 適用率が 90% 未満の場合は注意喚起
+
+            **【要注意】ポリシー適用エラー**
+            - 構成プロファイルまたはコンプライアンスポリシーでエラーが発生している場合、
+              ポリシー名とエラー件数を記載
+
+            **【要注意】アプリ配布失敗**
+            - インストール失敗率が高いアプリがある場合、アプリ名と失敗件数を記載
+
+            **【要注意】重複デバイスオブジェクト**
+            - 同一デバイス名で複数の Intune オブジェクトが存在するグループ数を記載
+            - 重複が多い場合（10件以上）は棚卸しを推奨
+
+            **【要注意】プライマリユーザー不在デバイス**
+            - userPrincipalName が空/未設定のデバイス数を記載
+            - 管理対象の妥当性（共有端末運用、ユーザー割り当て漏れ等）を確認するよう注意喚起
+
+            ##### 推奨対策一覧
+
+            | 優先度 | 対策カテゴリ | 対象 | 推奨アクション |
+            |---|---|---|---|
+            | High | 即時対応 | 対象デバイス | 具体的なアクション |
+
+            対策カテゴリは以下から選択:
+            「即時対応」「パッチ管理」「Defender 更新」「ポリシー修正」「アプリ配布」「監視継続」
+
+            ---
+
+            #### セクション 3: OS 別デバイスアセット一覧
+
+            `## 3. OS 別デバイスアセット一覧` として記載する。
+
+            | OS | デバイス数 | 割合 | 先週比 |
+            |---|---|---|---|
+            | Windows 11 | N | XX% | ▲/▼/→ |
+            | Windows 10 | N | XX% | ▲/▼/→ |
+            | iOS | N | XX% | ▲/▼/→ |
+            | Android | N | XX% | ▲/▼/→ |
+            | macOS | N | XX% | ▲/▼/→ |
+
+            ---
+
+            #### セクション 4: デバイス登録状況（週次増減トレンド）
+
+            `## 4. デバイス登録状況（週次増減トレンド）` として記載する。
+
+            今週の新規登録デバイス数と先週の比較（増減をパーセンテージで表示）を記載する。
+
+            今週登録されたデバイスの上位リスト（最大10件）:
+
+            | デバイス名 | OS | 登録日時 | 備考 |
+            |---|---|---|---|
+            | デバイス名 | Windows | YYYY-MM-DD | NEW |
+
+            ---
+
+            #### セクション 5: エラー・非準拠デバイスの詳細
+
+            `## 5. エラー・非準拠デバイスの詳細` として記載する。
+
+            ##### コンプライアンス状態別サマリー
+
+            | コンプライアンス状態 | デバイス数 |
+            |---|---|
+            | Compliant | N |
+            | NonCompliant | N |
+            | Error | N |
+            | Unknown | N |
+            | InGracePeriod | N |
+
+            ##### エラー・非準拠デバイス一覧（上位10件）
+
+            | デバイス名 | OS プラットフォーム | コンプライアンス状態 | 最終チェックイン日時 |
+            |---|---|---|---|
+            | デバイス名 | Windows | NonCompliant | YYYY-MM-DD |
+
+            ##### 5-1: プライマリユーザー不在デバイス
+
+            プライマリユーザーなしデバイス総数: N 件
+
+            | デバイス名 | OS | コンプライアンス状態 | 登録日時 | 最終チェックイン日時 | モデル |
+            |---|---|---|---|---|---|
+            | デバイス名 | Windows | Compliant | YYYY-MM-DD | YYYY-MM-DD | モデル名 |
+
+            > プライマリユーザーが削除済み/不明/共有端末などの可能性があるため、対象端末の管理方針を確認してください。
+
+            ---
+
+            #### セクション 6: 管理対象アプリケーションサマリー
+
+            `## 6. 管理対象アプリケーションサマリー` として記載する。
+
+            管理対象アプリ総数: N 件
+
+            | 状態 | 件数 |
+            |---|---|
+            | インストール済み | N |
+            | 失敗 | N |
+            | 保留中 | N |
+            | 対象外 | N |
+
+            ##### 6-1: インストール失敗が多いアプリ Top 5
+
+            | アプリ名 | プラットフォーム | インストール済み | 失敗 | 失敗率 |
+            |---|---|---|---|---|
+            | アプリ名 | Windows | N | N | XX% |
+
+            失敗率 = 失敗件数 / (インストール済み件数 + 失敗件数) × 100
+
+            ---
+
+            #### セクション 7: Intune ポリシー状況
+
+            `## 7. Intune ポリシー状況` として記載する。
+
+            ##### 7-1: 構成プロファイル
+
+            | プロファイル名 | 割り当て済みデバイス数 | 成功 | エラー | 競合 |
+            |---|---|---|---|---|
+            | プロファイル名 | N | N | N | N |
+
+            ##### 7-2: コンプライアンスポリシー
+
+            | ポリシー名 | 割り当てグループ数 | 準拠 | 非準拠 | エラー |
+            |---|---|---|---|---|
+            | ポリシー名 | N | N | N | N |
+
+            ---
+
+            #### セクション 8: コンプライアンスステータス（全体）
+
+            `## 8. コンプライアンスステータス（全体）` として記載する。
+
+            | 状態 | デバイス数 | 割合 |
+            |---|---|---|
+            | Compliant | N | XX% |
+            | NonCompliant | N | XX% |
+            | Unknown | N | XX% |
+            | Error | N | XX% |
+            | InGracePeriod | N | XX% |
+
+            先週との比較コメント（準拠率が上昇・下降・横ばい）を1文で記載する。
+
+            ---
+
+            #### セクション 9: Windows パッチ遅延デバイス
+
+            `## 9. Windows パッチ遅延デバイス（未修正 CVE が 10 件以上）` として記載する。
+
+            パッチ遅延デバイス総数: N 件
+
+            | デバイス名 | OS バージョン | 未修正 CVE 数 | リスクレベル |
+            |---|---|---|---|
+            | デバイス名 | 22H2 | N | 🔴 高（50件以上）/ 🟠 中（20〜49件）/ 🟡 低（10〜19件） |
+
+            ---
+
+            #### セクション 10: 重複デバイスオブジェクト
+
+            `## 10. 重複デバイスオブジェクト` として記載する。
+
+            重複デバイスグループ総数: N グループ
+
+            | デバイス名 | オブジェクト数 | 最新登録日時 | 最新最終チェックイン | 最新状態 | 最古登録日時 | 最古最終チェックイン | 最古状態 |
+            |---|---|---|---|---|---|---|---|
+            | デバイス名 | N | YYYY-MM-DD | YYYY-MM-DD | Compliant | YYYY-MM-DD | YYYY-MM-DD | NonCompliant |
+
+            > 古いオブジェクトは Intune 管理センターからの削除を検討してください。
+
+            ---
+
+            #### セクション 11: Defender エンジンバージョン状況
+
+            `## 11. Defender エンジンバージョン状況` として記載する。
+
+            ##### 11-1: MDAV（Microsoft Defender ウイルス対策）バージョン
+
+            | SoftwareVersion | デバイス数 | 備考 |
+            |---|---|---|
+            | x.x.x.x | N | 最多バージョン |
+
+            最新バージョン適用率: XX%
+
+            ##### 11-2: MDE（Microsoft Defender for Endpoint）バージョン
+
+            | SoftwareVersion | デバイス数 | 備考 |
+            |---|---|---|
+            | x.x.x.x | N | 最多バージョン |
+
+            最新バージョン適用率: XX%
+
+            ---
+
+            #### フッター
+
+            ```
+            ---
+            > 本レポートは Security Copilot エージェントにより自動生成されました。
+            > 生成日時: YYYY-MM-DD HH:MM UTC
+            ```
+
+            # 出力
+            上記の構造に従った Markdown レポートのみを出力してください。
+            メール送信は行わないこと。
+            レポート外のコメントや説明文は不要です。
+        ChildSkills:
+          - GetIntuneDevices
+          - GetCompliancePolicies
+          - GetConfigurationProfiles
+          - GetManagedApps
+          - GetWindowsPatchLagDevices
+          - GetMDAVEngineVersions
+          - GetMDEClientVersions
+
+  # ─────────────────────────────────────────────────
+  # KQL Skills — Defender Advanced Hunting
+  # ─────────────────────────────────────────────────
+  - Format: KQL
+    Skills:
+      - Name: GetWindowsPatchLagDevices
+        DisplayName: Get Windows Devices with Pending OS Vulnerabilities
+        Description: >-
+          Defender TVM の DeviceTvmSoftwareVulnerabilities テーブルを使用して、
+          未修正の OS レベル CVE が多い Windows デバイス（パッチ適用遅延の可能性）を特定します。
+          未修正 CVE 数をパッチ遅延の指標として使用します。
+        Settings:
+          Target: Defender
+          Template: |-
+            DeviceTvmSoftwareVulnerabilities
+            | where OSPlatform startswith_cs "Windows"
+            | summarize
+                PendingCveCount = dcount(CveId),
+                DeviceName = any(DeviceName)
+              by DeviceId, OSPlatform
+            | where PendingCveCount >= 10
+            | project DeviceId, DeviceName, OSPlatform, PendingCveCount
+            | sort by PendingCveCount desc
+            | take 50
+
+      - Name: GetMDAVEngineVersions
+        DisplayName: Get MDAV Antivirus Version Distribution
+        Description: >-
+          Defender TVM の DeviceTvmSoftwareInventory テーブルを使用して、
+          管理対象 Windows デバイス全体の Microsoft Defender ウイルス対策（MDAV）
+          ソフトウェアバージョン分布を取得します。
+        Settings:
+          Target: Defender
+          Template: |-
+            DeviceTvmSoftwareInventory
+            | where OSPlatform startswith_cs "Windows"
+            | where SoftwareName == "windows_defender"
+            | summarize DeviceCount = dcount(DeviceId) by SoftwareVersion
+            | sort by DeviceCount desc
+
+      - Name: GetMDEClientVersions
+        DisplayName: Get MDE Sensor Client Version Distribution
+        Description: >-
+          Defender TVM の DeviceTvmSoftwareInventory テーブルを使用して、
+          管理対象 Windows デバイス全体の Microsoft Defender for Endpoint（MDE）
+          センサークライアントバージョン分布を取得します。
+        Settings:
+          Target: Defender
+          Template: |-
+            DeviceTvmSoftwareInventory
+            | where OSPlatform startswith_cs "Windows"
+            | where SoftwareName == "defender_for_endpoint"
+            | summarize DeviceCount = dcount(DeviceId) by SoftwareVersion
+            | sort by DeviceCount desc
