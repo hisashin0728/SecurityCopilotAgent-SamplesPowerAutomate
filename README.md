@@ -1,0 +1,2 @@
+# SecurityCopilotAgent-SamplesPowerAutomate
+Security Copilot カスタムエージェントを PowerAutomate 経由で呼び出すサンプル集
