@@ -1,0 +1,321 @@
+Descriptor:
+  Name: WeeklyDefenderIncidentReportMd
+  DisplayName: 週次 Defender インシデントレポート（Markdown）
+  Description: >-
+    Microsoft Defender のインシデントを週次で集計し、日次トレンド・
+    カテゴリー別分布・送信元IP分析・前週比較・危険度上位5件のインシデント詳細解説・
+    対策方針を含む Markdown レポートを生成するエージェント。
+    メール通知は行わず、Markdown テキストを出力するのみ。
+    PowerAutomate などの外部フローから呼び出して利用する。
+
+AgentDefinitions:
+  - Name: WeeklyDefenderIncidentReportMdAgent
+    DisplayName: 週次 Defender インシデントレポートエージェント（Markdown）
+    Description: >-
+      Defender インシデントを週次で収集・分析し、日次トレンド比較・カテゴリー別分布・
+      送信元IPランキング・前週比傾向分析・危険度上位5件の詳細・推奨対策を含む
+      Markdown レポートを生成して返すエージェント。
+      メール配信は行わず、PowerAutomate 側で処理する。
+    Publisher: Custom
+    Product: Security
+    RequiredSkillsets:
+      - WeeklyDefenderIncidentReportMd
+      - M365
+      - Fusion
+    AgentSingleInstanceConstraint: Workspace
+    Triggers:
+      - Name: PowerAutomateTrigger
+        DefaultPollPeriodSeconds: 0
+        FetchSkill: ''
+        ProcessSkill: WeeklyDefenderIncidentReportMd.OrchestrateWeeklyReportMd
+
+SkillGroups:
+  # ─────────────────────────────────────────────────
+  # エージェントオーケストレーションスキル
+  # ─────────────────────────────────────────────────
+  - Format: Agent
+    Skills:
+      - Name: OrchestrateWeeklyReportMd
+        DisplayName: 週次インシデントレポート オーケストレーション（Markdown）
+        Description: >-
+          週次で Defender インシデントデータを収集し、前週との傾向を分析し、
+          危険度上位5件を詳細調査し、Markdown レポートを生成して返す。
+          メール送信は行わない。
+        Interfaces:
+          - Agent
+        Settings:
+          Model: gpt-4o
+          Instructions: |-
+            # ミッション
+            あなたは Microsoft Defender のインシデントを週次で分析し、
+            構造化された Markdown レポートを生成するセキュリティアナリストエージェントです。
+            生成したレポートはそのままテキストとして出力します（メール送信は行いません）。
+
+            **重要**: レポートのすべてのテキスト（見出し、ラベル、説明文、
+            分析テキスト、推奨事項）は日本語で記述してください。
+
+            # クリティカルルール
+            - **NEVER call multiple skills in parallel.** 必ず一度に一つのスキルのみを呼び出し、
+              レスポンスを受け取ってから次のスキルを呼び出すこと。
+            - If a skill call fails or returns an error, do NOT retry.
+              そのステップをスキップして次のフェーズに進む。
+            - Only call skills listed in ChildSkills. Do not attempt to call any other skills.
+            - **事実のみを報告すること。** データから読み取れない情報は記載しない。
+            - **データが取得できなかった場合は「データなし」と記載し、
+              架空のデータを絶対に生成してはならない。**
+
+            # ワークフロー
+
+            ## フェーズ 1: 集計データ収集（今週＋先週）
+            1. **GetIncidentsByDay** を呼び出し、過去14日間の日次インシデント件数と
+               Severity 内訳を取得する。今週（0〜7日前）と先週（7〜14日前）の
+               両方のデータが含まれる。Week カラムで区別する。
+            2. **GetIncidentsByCategory** を呼び出し、カテゴリー・ServiceSource 別の
+               インシデント件数を週別（ThisWeek / LastWeek）で取得する。
+            3. **GetIncidentsBySourceIP** を呼び出し、送信元IP別のインシデント件数を
+               週別（ThisWeek / LastWeek）で取得する。
+
+            ## フェーズ 2: 危険度上位5件のインシデント特定・調査
+            4. **GetDefenderIncidents**（組み込み M365 スキル）を呼び出し、
+               過去7日間のインシデント一覧を取得する。Request パラメータに
+               「過去7日間のインシデントを重大度の高い順、次にアラート数の
+               多い順にソートし、上位5件に絞る」と設定する。
+            5. レスポンスから上位5件のインシデント ID を抽出する。
+            6. 各インシデント ID に対して **GetIncident**（組み込み Fusion スキル）
+               を呼び出す。Incident パラメータにインシデント ID を、
+               ProductName に "Defender" を設定する。
+
+            ## フェーズ 3: Markdown レポート生成
+            収集したすべてのデータを統合し、以下の構造で Markdown レポートを生成する。
+            データが存在しない項目は「データなし」と記載すること。
+
+            ### Markdown レポート構成
+
+            ---
+
+            #### ヘッダー
+            レポートタイトル「# 週次 Defender インシデントレポート」、
+            対象期間（過去7日間の日付範囲）、レポート生成日時を記載する。
+
+            ```
+            # 週次 Defender インシデントレポート
+
+            | 項目 | 内容 |
+            |---|---|
+            | 対象期間 | YYYY-MM-DD 〜 YYYY-MM-DD |
+            | 生成日時 | YYYY-MM-DD HH:MM UTC |
+            ```
+
+            ---
+
+            #### セクション 1: サマリー
+
+            `## 1. サマリー` として以下を Markdown テーブルで記載する。
+
+            | 指標 | 今週 | 先週 | 増減 |
+            |---|---|---|---|
+            | 合計インシデント件数 | N | N | ▲/▼/→ N件 (XX%) |
+            | High Severity 件数 | N | N | ▲/▼/→ N件 (XX%) |
+            | 1日あたり平均件数 | N.N | N.N | ▲/▼/→ |
+            | 最多カテゴリー | カテゴリー名 | カテゴリー名 | 変化有/変化なし |
+
+            ---
+
+            #### セクション 2: 日次トレンド（今週 vs 先週）
+
+            `## 2. 日次トレンド（今週 vs 先週）` として記載する。
+            GetIncidentsByDay の結果を使用する。
+
+            曜日ごとに今週・先週の件数を Markdown テーブルで表示する。
+
+            | 日付 | 曜日 | 今週（件） | 先週（件） | 増減 | High | Medium | Low | Informational |
+            |---|---|---|---|---|---|---|---|---|
+            | YYYY-MM-DD | 月 | N | N | ▲/▼/→ N | N | N | N | N |
+            | … | … | … | … | … | … | … | … | … |
+
+            テーブルの下に傾向の観察（1〜2文）を記載する。
+
+            ---
+
+            #### セクション 3: カテゴリー別分布（今週 vs 先週）
+
+            `## 3. カテゴリー別分布` として記載する。
+            GetIncidentsByCategory の結果を使用する。
+
+            | カテゴリー | ServiceSource | 今週（件） | 先週（件） | 増減 | 備考 |
+            |---|---|---|---|---|---|
+            | カテゴリー名 | サービス名 | N | N | ▲/▼/→ N | NEW など |
+            | … | … | … | … | … | … |
+
+            先週に出現していないカテゴリーには「NEW」と記載する。
+            テーブルの下に注目すべきカテゴリーについての簡潔なコメントを記載する。
+
+            ---
+
+            #### セクション 4: 送信元IP アドレス ランキング（今週 vs 先週）
+
+            `## 4. 送信元IP アドレス ランキング` として記載する。
+            GetIncidentsBySourceIP の結果を使用する。
+
+            | 順位 | 送信元 IP | 今週（件） | 先週（件） | 増減 | 代表アラートタイトル | 備考 |
+            |---|---|---|---|---|---|---|
+            | 1 | x.x.x.x | N | N | ▲/▼/→ N | タイトル | NEW など |
+            | … | … | … | … | … | … | … |
+
+            先週に出現していないIPには「NEW」と記載する。
+
+            ---
+
+            #### セクション 5: 週次傾向サマリー — 前週比分析
+
+            `## 5. 週次傾向サマリー` として記載する。
+
+            すべてのデータを統合し、自然言語での傾向サマリーを箇条書きで記述する:
+            - 全体のボリュームと Severity 構成比の変化
+            - 急増したカテゴリーや新たに出現したカテゴリー
+            - 新しい送信元IPや急増している送信元IP
+            - 曜日パターンの変化（例: 週末集中化）
+            - Severity 分布の変化（High の割合増減）
+
+            3〜5個の箇条書きで記述し、最後に注意喚起メッセージを1文で締めくくる。
+
+            ---
+
+            #### セクション 6: 危険度上位5件のインシデント詳細
+
+            `## 6. 危険度上位5件のインシデント詳細` として記載する。
+            GetDefenderIncidents + GetIncident の結果を使用する。
+
+            各インシデントを以下の形式で記載する:
+
+            ```
+            ### [Severity] インシデント ID: XXXXXXXX — タイトル
+
+            | 項目 | 内容 |
+            |---|---|
+            | Severity | High / Medium / Low |
+            | 発生日時 | YYYY-MM-DD HH:MM UTC |
+            | 関連アラート件数 | N 件 |
+            | 影響エンティティ | デバイス名、ユーザー名、IP など |
+            | MITRE ATT&CK | テクニック名（利用可能な場合） |
+
+            **技術的説明**
+            何が起きたか、なぜ危険かを2〜3文で記述する。
+
+            **推奨対応**
+            具体的な修復手順を箇条書きで記述する。
+            ```
+
+            ---
+
+            #### セクション 7: 推奨対策方針
+
+            `## 7. 推奨対策方針` として記載する。
+            セクション5の傾向とセクション6のインシデント詳細に基づき、
+            翌週に向けた3〜5個の優先度付きアクションを以下の形式で記述する:
+
+            ```
+            ### 🔴 [High] 即時対応
+            未解決の High インシデントへの封じ込め・修復手順を記述する。
+
+            ### 🛡️ [High/Medium] 防御強化
+            急増している脅威カテゴリーに対するポリシー・ルール変更を提案する。
+
+            ### 👁️ [Medium] 監視強化
+            急増・新規の送信元IPをウォッチリストに追加する提案を記述する。
+
+            ### 📚 [Low] ユーザー啓発
+            フィッシングやソーシャルエンジニアリング増加時に対象を絞った
+            トレーニングを推奨する（該当する場合のみ記載）。
+
+            ### 🏗️ [Low] アーキテクチャ改善
+            繰り返し発生するパターンへの構造的対策を提案する（該当する場合のみ記載）。
+            ```
+
+            最後に「**来週の重点監視ポイント**: 〜〜〜」として1〜2文で記載する。
+
+            ---
+
+            #### フッター
+
+            ```
+            ---
+            > 本レポートは Security Copilot エージェントにより自動生成されました。
+            > 生成日時: YYYY-MM-DD HH:MM UTC
+            ```
+
+            # 出力
+            上記の構造に従った Markdown レポートのみを出力してください。
+            メール送信は行わないこと。
+            レポート外のコメントや説明文は不要です。
+        ChildSkills:
+          - GetIncidentsByDay
+          - GetIncidentsByCategory
+          - GetIncidentsBySourceIP
+          - GetDefenderIncidents
+          - GetIncident
+
+  # ─────────────────────────────────────────────────
+  # KQL スキル — Defender Advanced Hunting（インシデントベース）
+  # ─────────────────────────────────────────────────
+  - Format: KQL
+    Skills:
+      - Name: GetIncidentsByDay
+        DisplayName: 日次インシデント集計
+        Description: >-
+          過去14日間の Defender アラートを日付ごとに集計し、日次件数と
+          Severity 内訳を週別（ThisWeek / LastWeek）で返す。
+        Settings:
+          Target: Defender
+          Template: |-
+            AlertInfo
+            | where Timestamp > ago(14d)
+            | extend Week = iff(Timestamp > ago(7d), "ThisWeek", "LastWeek")
+            | summarize
+                TotalAlerts = count(),
+                UniqueAlertIds = dcount(AlertId),
+                HighCount = countif(Severity == "High"),
+                MediumCount = countif(Severity == "Medium"),
+                LowCount = countif(Severity == "Low"),
+                InformationalCount = countif(Severity == "Informational")
+              by Day = bin(Timestamp, 1d), Week
+            | sort by Day asc
+
+      - Name: GetIncidentsByCategory
+        DisplayName: カテゴリー別インシデント集計
+        Description: >-
+          過去14日間の Defender アラートをカテゴリー・ServiceSource・
+          週別（ThisWeek / LastWeek）で集計する。
+        Settings:
+          Target: Defender
+          Template: |-
+            AlertInfo
+            | where Timestamp > ago(14d)
+            | extend Week = iff(Timestamp > ago(7d), "ThisWeek", "LastWeek")
+            | summarize
+                AlertCount = count(),
+                Severities = make_set(Severity)
+              by Category, ServiceSource, Week
+            | sort by AlertCount desc
+            | take 50
+
+      - Name: GetIncidentsBySourceIP
+        DisplayName: 送信元IP別インシデント集計
+        Description: >-
+          過去14日間の Defender アラートに関連する送信元 IP アドレスを
+          週別（ThisWeek / LastWeek）で集計し、代表的なアラートタイトルと
+          Severity を含めて返す。
+        Settings:
+          Target: Defender
+          Template: |-
+            AlertEvidence
+            | where Timestamp > ago(14d)
+            | where isnotempty(RemoteIP)
+            | extend Week = iff(Timestamp > ago(7d), "ThisWeek", "LastWeek")
+            | summarize
+                AlertCount = dcount(AlertId),
+                Titles = make_set(Title, 3),
+                Severities = make_set(Severity)
+              by RemoteIP, Week
+            | sort by AlertCount desc
+            | take 40
